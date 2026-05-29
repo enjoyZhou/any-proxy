@@ -10,6 +10,7 @@
 - **自动 URL 重写** - 自动重写 HTML/CSS/JS 中的绝对 URL，确保资源正确加载
 - **CORS 支持** - 自动处理跨域问题
 - **完整请求转发** - 支持 GET/POST/PUT/DELETE 等所有 HTTP 方法
+- **长连接代理** - 支持 WebSocket Upgrade、SSE 和常见流式响应透传
 
 ## 使用方法
 
@@ -42,6 +43,10 @@ const TARGET_URL = `https://${TARGET_HOST}`;
 - 请遵守相关法律法规，合理使用代理服务
 - 部分网站可能有反代理检测，可能无法正常访问
 - 建议仅用于个人学习和合法用途
+
+## 技术文档
+
+项目实现细节、请求处理流程、部署配置和维护建议见 [docs/TECHNICAL.md](docs/TECHNICAL.md)。
 
 ## 详细教程
 
