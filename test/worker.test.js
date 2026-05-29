@@ -84,20 +84,36 @@ test('请求头改写会调整 Host、Origin、Referer 并清理 hop-by-hop head
   const request = new Request('https://proxy.example.com/path?x=1#hash', {
     headers: {
       Connection: 'keep-alive',
+      'CF-Connecting-IP': '2a06:98c0:3600::103',
+      'CF-EW-Preview-Server': 'https://1173m20.cfops.net',
+      'CF-IPCountry': 'US',
+      'CF-Ray': 'a034992d6d7fedd9',
+      'CF-Visitor': '{"scheme":"https"}',
       Host: 'proxy.example.com',
       Origin: 'https://proxy.example.com',
       Referer: 'https://proxy.example.com/from?next=1#section',
-      Upgrade: 'h2c'
+      Upgrade: 'h2c',
+      'X-Forwarded-For': '203.0.113.10',
+      'X-Forwarded-Proto': 'https',
+      'X-Real-IP': '203.0.113.10'
     }
   });
 
   const headers = buildProxyRequestHeaders(request, new URL(request.url));
 
-  assert.equal(headers.get('Host'), 'anyrouter.top');
+  assert.equal(headers.get('Host'), new URL(TARGET_URL).host);
   assert.equal(headers.get('Origin'), TARGET_URL);
   assert.equal(headers.get('Referer'), `${TARGET_URL}/from?next=1#section`);
   assert.equal(headers.has('Connection'), false);
   assert.equal(headers.has('Upgrade'), false);
+  assert.equal(headers.has('CF-Connecting-IP'), false);
+  assert.equal(headers.has('CF-EW-Preview-Server'), false);
+  assert.equal(headers.has('CF-IPCountry'), false);
+  assert.equal(headers.has('CF-Ray'), false);
+  assert.equal(headers.has('CF-Visitor'), false);
+  assert.equal(headers.has('X-Forwarded-For'), false);
+  assert.equal(headers.has('X-Forwarded-Proto'), false);
+  assert.equal(headers.has('X-Real-IP'), false);
 });
 
 test('重定向处理会改写目标站点同源 Location 并保留外部 Location', () => {
@@ -107,7 +123,7 @@ test('重定向处理会改写目标站点同源 Location 并保留外部 Locati
   );
 
   assert.equal(
-    rewriteRedirectLocation('https://anyrouter.top/account#profile', 'https://proxy.example.com/start'),
+    rewriteRedirectLocation(`${TARGET_URL}/account#profile`, 'https://proxy.example.com/start'),
     'https://proxy.example.com/account#profile'
   );
 
@@ -139,13 +155,14 @@ test('代理响应中的重定向 Location 会在 handleRequest 中改写', asyn
 });
 
 test('URL 重写覆盖 HTTP、协议相对和 WebSocket 绝对地址', () => {
+  const targetHost = new URL(TARGET_URL).host;
   const rewritten = rewriteUrlsInContent(
     [
-      'https://anyrouter.top/assets/app.js',
-      'http://anyrouter.top/api',
-      '//anyrouter.top/cdn.css',
-      'wss://anyrouter.top/socket',
-      'ws://anyrouter.top/events'
+      `${TARGET_URL}/assets/app.js`,
+      `http://${targetHost}/api`,
+      `//${targetHost}/cdn.css`,
+      `wss://${targetHost}/socket`,
+      `ws://${targetHost}/events`
     ].join('\n'),
     'https://proxy.example.com/page',
     TARGET_URL
@@ -156,6 +173,7 @@ test('URL 重写覆盖 HTTP、协议相对和 WebSocket 绝对地址', () => {
   assert.match(rewritten, /\/\/proxy\.example\.com\/cdn\.css/);
   assert.match(rewritten, /wss:\/\/proxy\.example\.com\/socket/);
   assert.match(rewritten, /wss:\/\/proxy\.example\.com\/events/);
+  assert.equal(rewritten.includes(targetHost), false);
 });
 
 test('SSE 响应保持流式透传且不会调用 response.text()', async () => {

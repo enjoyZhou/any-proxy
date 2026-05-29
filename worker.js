@@ -10,8 +10,10 @@
  */
 
 // 目标网站地址
-const TARGET_HOST = 'anyrouter.top';
+const TARGET_HOST = 'web.gmssh.com';
 const TARGET_URL = `https://${TARGET_HOST}`;
+const TARGET_ORIGIN = new URL(TARGET_URL).origin;
+const TARGET_HEADER_HOST = new URL(TARGET_URL).host;
 
 // Hop-by-hop headers 不应在代理请求/响应中透传。
 const HOP_BY_HOP_HEADERS = [
@@ -22,6 +24,13 @@ const HOP_BY_HOP_HEADERS = [
   'te',
   'trailer',
   'transfer-encoding'
+];
+
+// Cloudflare/上游代理注入的边缘转发头不应继续透传给目标站点。
+const EDGE_PROXY_REQUEST_HEADERS = [
+  'cdn-loop',
+  'true-client-ip',
+  'x-real-ip'
 ];
 
 // 这些类型必须保持流式透传，不能调用 response.text() 读完整响应。
@@ -251,6 +260,7 @@ function buildProxyRequestHeaders(request, proxyUrl) {
   const headers = new Headers(request.headers);
 
   HOP_BY_HOP_HEADERS.forEach(header => headers.delete(header));
+  removeEdgeProxyRequestHeaders(headers);
 
   if (isWebSocketRequest(request)) {
     headers.set('Upgrade', 'websocket');
@@ -265,7 +275,7 @@ function buildProxyRequestHeaders(request, proxyUrl) {
     headers.set('Accept-Encoding', 'identity');
   }
 
-  headers.set('Host', TARGET_HOST);
+  headers.set('Host', TARGET_HEADER_HOST);
 
   if (headers.has('Origin')) {
     headers.set('Origin', TARGET_URL);
@@ -282,6 +292,23 @@ function buildProxyRequestHeaders(request, proxyUrl) {
   }
 
   return headers;
+}
+
+/**
+ * 删除 Cloudflare/代理链路头，避免目标站点把 Worker 请求识别为伪造边缘请求。
+ * @param {Headers} headers - 待转发请求头
+ */
+function removeEdgeProxyRequestHeaders(headers) {
+  for (const key of Array.from(headers.keys())) {
+    const lowerKey = key.toLowerCase();
+    if (
+      lowerKey.startsWith('cf-') ||
+      lowerKey.startsWith('x-forwarded-') ||
+      EDGE_PROXY_REQUEST_HEADERS.includes(lowerKey)
+    ) {
+      headers.delete(key);
+    }
+  }
 }
 
 /**
@@ -518,9 +545,9 @@ function prepareRewrittenTextHeaders(headers) {
 function rewriteRedirectLocation(location, proxyRequestUrl) {
   try {
     const proxyOrigin = new URL(proxyRequestUrl).origin;
-    const redirectUrl = new URL(location, TARGET_URL);
+    const redirectUrl = new URL(location, TARGET_ORIGIN);
 
-    if (redirectUrl.origin === TARGET_URL) {
+    if (redirectUrl.origin === TARGET_ORIGIN) {
       return `${proxyOrigin}${redirectUrl.pathname}${redirectUrl.search}${redirectUrl.hash}`;
     }
   } catch (e) {
@@ -532,7 +559,7 @@ function rewriteRedirectLocation(location, proxyRequestUrl) {
 
 /**
  * 重写内容中的绝对 URL
- * 将 anyrouter.top 的绝对 URL 替换为相对 URL，使其通过代理访问
+ * 将目标站点的绝对 URL 替换为代理 URL，使其通过代理访问
  * @param {string} content - 原始内容
  * @param {string} proxyUrl - 代理的 URL
  * @param {string} targetUrl - 目标网站的 URL
@@ -540,43 +567,36 @@ function rewriteRedirectLocation(location, proxyRequestUrl) {
  */
 function rewriteUrlsInContent(content, proxyUrl, targetUrl) {
   try {
-    // 获取代理的 origin (例如: https://any.chaosyn.com)
-    const proxyOrigin = new URL(proxyUrl).origin;
+    const proxy = new URL(proxyUrl);
+    const target = new URL(targetUrl);
+    const proxyOrigin = proxy.origin;
+    const proxyHost = proxy.host;
 
     // 使用更精确的正则表达式，避免意外匹配。
-    const escapedTargetUrl = TARGET_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const escapedTargetHttpUrl = `http://${TARGET_HOST}`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const escapedTargetHost = TARGET_HOST.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escapedTargetHostname = target.hostname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escapedTargetPort = target.port.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const optionalTargetPort = escapedTargetPort ? `(?::${escapedTargetPort})?` : '';
+    const targetUrlEnd = '(?=[/?#]|$)';
     const proxyWebSocketOrigin = proxyOrigin.replace(/^http/i, 'ws');
 
     let rewritten = content;
 
-    // 重写 HTTP(S) 绝对 URL: https://anyrouter.top -> https://any.chaosyn.com
+    // 重写 HTTP(S) 绝对 URL。
     rewritten = rewritten.replace(
-      new RegExp(escapedTargetUrl, 'g'),
+      new RegExp(`https?://${escapedTargetHostname}${optionalTargetPort}${targetUrlEnd}`, 'g'),
       proxyOrigin
     );
 
+    // 重写 WebSocket 绝对 URL。
     rewritten = rewritten.replace(
-      new RegExp(escapedTargetHttpUrl, 'g'),
-      proxyOrigin
-    );
-
-    // 重写 WebSocket 绝对 URL: wss://anyrouter.top -> wss://any.chaosyn.com
-    rewritten = rewritten.replace(
-      new RegExp(`wss://${escapedTargetHost}`, 'g'),
+      new RegExp(`wss?://${escapedTargetHostname}${optionalTargetPort}${targetUrlEnd}`, 'g'),
       proxyWebSocketOrigin
     );
 
+    // 处理协议相对 URL。
     rewritten = rewritten.replace(
-      new RegExp(`ws://${escapedTargetHost}`, 'g'),
-      proxyWebSocketOrigin
-    );
-
-    // 处理协议相对 URL: //anyrouter.top -> //any.chaosyn.com
-    rewritten = rewritten.replace(
-      new RegExp(`//${escapedTargetHost}(?![\\w])`, 'g'),
-      `//${new URL(proxyUrl).hostname}`
+      new RegExp(`//${escapedTargetHostname}${optionalTargetPort}${targetUrlEnd}`, 'g'),
+      `//${proxyHost}`
     );
 
     return rewritten;
